@@ -1,291 +1,470 @@
-import argparse
-import json
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Huffman Adaptatif (Algorithme de Vitter)
+TP2: Compression de données - Huffman adaptatif
+Ismaïl ABLOUA
+"""
+
+import os
+import sys
 import math
-from dataclasses import dataclass
 from pathlib import Path
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 M = len(ALPHABET)
-E = int(math.floor(math.log2(M)))
-R = M - (2 ** E)
-
-_CHAR_TO_INDEX = {ch: i for i, ch in enumerate(ALPHABET)}
+E = int(math.floor(math.log2(M)))  # 5 (2^5 = 32)
+R = M - 2**E  # 4 (36-32)
 
 
-@dataclass
 class Node:
-    weight: int
-    order: int
-    symbol: str | None = None
-    parent: "Node | None" = None
-    left: "Node | None" = None
-    right: "Node | None" = None
-
-    def is_leaf(self) -> bool:
-        return self.left is None and self.right is None
+    """Nœud de l'arbre de Huffman adaptatif"""
+    node_counter = 0
+    
+    def __init__(self, char=None, weight=0, is_nyt=False):
+        self.char = char  # caractère ou None pour nœud interne
+        self.weight = weight
+        self.parent = None
+        self.left = None
+        self.right = None
+        self.is_nyt = is_nyt
+        self.node_id = Node.node_counter
+        Node.node_counter += 1
+    
+    def __repr__(self):
+        if self.is_nyt:
+            return f"NYT({self.weight})"
+        elif self.char:
+            return f"{self.char}({self.weight})"
+        else:
+            return f"Internal({self.weight})"
 
 
 class AdaptiveHuffman:
-    def __init__(self) -> None:
-        max_nodes = (2 * M) - 1
-        self.root = Node(weight=0, order=max_nodes)
-        self.nyt = self.root
-        self.leaves: dict[str, Node] = {}
-
-    @staticmethod
-    def _is_ancestor(ancestor: Node, node: Node) -> bool:
-        current = node.parent
-        while current is not None:
-            if current is ancestor:
-                return True
-            current = current.parent
-        return False
-
-    def _collect_nodes(self, node: Node | None = None) -> list[Node]:
-        if node is None:
-            node = self.root
-        nodes = [node]
-        if node.left is not None:
-            nodes.extend(self._collect_nodes(node.left))
-        if node.right is not None:
-            nodes.extend(self._collect_nodes(node.right))
-        return nodes
-
-    def _find_block_leader(self, node: Node) -> Node | None:
-        candidates = []
-        for current in self._collect_nodes():
-            if current.weight != node.weight:
-                continue
-            if current is node:
-                continue
-            if self._is_ancestor(current, node):
-                continue
-            if self._is_ancestor(node, current):
-                continue
-            candidates.append(current)
-        if not candidates:
-            return None
-        return max(candidates, key=lambda n: n.order)
-
-    @staticmethod
-    def _swap_orders(a: Node, b: Node) -> None:
-        a.order, b.order = b.order, a.order
-
-    def _swap_nodes(self, a: Node, b: Node) -> None:
-        if a is b:
-            return
-        pa, pb = a.parent, b.parent
-        if pa is None or pb is None:
-            return
-
-        if pa.left is a:
-            pa.left = b
-        else:
-            pa.right = b
-
-        if pb.left is b:
-            pb.left = a
-        else:
-            pb.right = a
-
-        a.parent, b.parent = pb, pa
-        self._swap_orders(a, b)
-
-    def _update(self, node: Node) -> None:
+    """Implémentation du Huffman adaptatif (Vitter)"""
+    
+    def __init__(self):
+        self.root = Node(is_nyt=True)  # Nœud NYT racine
+        self.alphabet = ALPHABET
+        self.char_nodes = {}  # Mapping char -> nœud feuille
+        self.tree_history = []  # Pour afficher l'évolution
+        self.swap_count = 0
+        
+    def find_nyt(self):
+        """Trouve le nœud NYT actuel"""
+        def search(node):
+            if node is None:
+                return None
+            if node.is_nyt:
+                return node
+            left_result = search(node.left)
+            if left_result:
+                return left_result
+            return search(node.right)
+        
+        return search(self.root)
+    
+    def is_leaf(self, node):
+        """Vérifie si un nœud est une feuille"""
+        return node.left is None and node.right is None
+    
+    def get_code_for_node(self, node):
+        """Obtient le code Huffman pour un nœud"""
+        code = ""
         current = node
-        while current is not None:
-            leader = self._find_block_leader(current)
-            if leader is not None and leader is not current.parent:
-                self._swap_nodes(current, leader)
-            current.weight += 1
-            current = current.parent
-
-    def _code_for_node(self, node: Node) -> str:
-        bits: list[str] = []
-        current = node
+        
         while current.parent is not None:
-            if current.parent.left is current:
-                bits.append("0")
+            if current.parent.left == current:
+                code = "0" + code
             else:
-                bits.append("1")
+                code = "1" + code
             current = current.parent
-        return "".join(reversed(bits))
-
-    def _insert_new_symbol(self, symbol: str) -> Node:
-        old_nyt = self.nyt
-        internal = Node(weight=0, order=old_nyt.order, parent=old_nyt.parent)
-        new_nyt = Node(weight=0, order=old_nyt.order - 2, parent=internal)
-        symbol_node = Node(weight=0, order=old_nyt.order - 1, symbol=symbol, parent=internal)
-        internal.left = new_nyt
-        internal.right = symbol_node
-
-        if old_nyt.parent is None:
-            self.root = internal
+        
+        return code
+    
+    def get_nyt_code(self):
+        """Obtient le code Huffman du nœud NYT"""
+        nyt_node = self.find_nyt()
+        return self.get_code_for_node(nyt_node)
+    
+    def encode_fixed_code(self, char):
+        """Encode un caractère avec le code fixe"""
+        k = self.alphabet.index(char) + 1
+        
+        if 0 <= k <= 2 * R:
+            # (k-1) sur (e+1) bits
+            bits = E + 1
+            value = k - 1
         else:
-            if old_nyt.parent.left is old_nyt:
-                old_nyt.parent.left = internal
+            # (k - r - 1) sur e bits
+            bits = E
+            value = k - R - 1
+        
+        return format(value, f'0{bits}b')
+    
+    def decode_fixed_code(self, bits):
+        """Décode un code fixe pour obtenir le caractère"""
+        # Lire e bits
+        e_bits = bits[:E]
+        e_value = int(e_bits, 2)
+        
+        if e_value < R:
+            # Lire e+1 bits
+            full_bits = bits[:E+1]
+            k = int(full_bits, 2) + 1
+            remaining = bits[E+1:]
+        else:
+            # Lire e bits supplémentaires
+            full_bits = bits[:E]
+            k = int(full_bits, 2) + R + 1
+            remaining = bits[E:]
+        
+        char = self.alphabet[k - 1]
+        return char, remaining
+    
+    def add_char_to_tree(self, char):
+        """Ajoute un caractère à l'arbre (première occurrence)"""
+        nyt_node = self.find_nyt()
+        
+        # Créer les deux enfants du NYT
+        new_nyt = Node(is_nyt=True)
+        new_char_node = Node(char=char, weight=1)
+        
+        # Remplacer le NYT par un nœud interne
+        nyt_node.is_nyt = False
+        nyt_node.left = new_nyt
+        nyt_node.right = new_char_node
+        # Le poids interne doit être la somme exacte des enfants: 0 + 1 = 1
+        nyt_node.weight = 1
+        new_nyt.parent = nyt_node
+        new_char_node.parent = nyt_node
+        
+        self.char_nodes[char] = new_char_node
+        
+        # Mettre à jour les ancêtres
+        self.update_ancestors(nyt_node)
+    
+    def update_ancestors(self, node):
+        """Met à jour les poids des ancêtres et fait les swaps"""
+        current = node
+        while current is not None:
+            if not self.is_leaf(current):
+                # Vérifier si swap nécessaire au niveau du nœud courant
+                if current.left and current.right and current.left.weight > current.right.weight:
+                    current.left, current.right = current.right, current.left
+                    self.swap_count += 1
+
+                # Le poids interne est la somme exacte des enfants
+                left_weight = current.left.weight if current.left else 0
+                right_weight = current.right.weight if current.right else 0
+                current.weight = left_weight + right_weight
+
+            current = current.parent
+    
+    def increment_char_weight(self, char):
+        """Incrémente le poids d'un caractère existant"""
+        if char not in self.char_nodes:
+            return
+        
+        node = self.char_nodes[char]
+        node.weight += 1
+        
+        # Mettre à jour les ancêtres
+        self.update_ancestors(node.parent)
+    
+    def encode_message(self, message, verbose=True):
+        """Encode un message avec Huffman adaptatif"""
+        encoded_codes = []
+        encoded_with_nyt = []
+        step = 0
+        
+        if verbose:
+            print("\n" + "=" * 60)
+            print("ÉTAPES DE L'ENCODAGE")
+            print("=" * 60)
+        
+        for i, char in enumerate(message):
+            if char not in self.alphabet:
+                continue
+            
+            step += 1
+            if verbose:
+                print(f"\nÉtape {step}: Caractère '{char}'")
+            
+            if char not in self.char_nodes:
+                # Nouvelle caractère
+                nyt_code = self.get_nyt_code()
+                fixed_code = self.encode_fixed_code(char)
+                full_code = nyt_code + fixed_code
+                
+                encoded_codes.append(full_code)
+                encoded_with_nyt.append(f"NYT")
+                
+                if verbose:
+                    print(f"  → Nouvelle lettre")
+                    print(f"  → Code NYT: {nyt_code}")
+                    print(f"  → Code fixe: {fixed_code}")
+                    print(f"  → Code complet: {full_code}")
+                
+                # Ajouter le caractère à l'arbre
+                self.add_char_to_tree(char)
+                
+                if verbose:
+                    print(f"  → Arbre mis à jour")
+                    self.print_tree()
+                    if self.swap_count > 0:
+                        print(f"  → ⚡ Swap effectué! (Total swaps: {self.swap_count})")
             else:
-                old_nyt.parent.right = internal
+                # Caractère connu
+                char_code = self.get_code_for_node(self.char_nodes[char])
+                encoded_codes.append(char_code)
+                encoded_with_nyt.append(char)
+                
+                if verbose:
+                    print(f"  → Caractère déjà rencontré")
+                    print(f"  → Code Huffman: {char_code}")
+                
+                # Incrémenter le poids
+                old_weight = self.char_nodes[char].weight
+                self.increment_char_weight(char)
+                
+                if verbose:
+                    print(f"  → Poids incrémenté: {old_weight} → {self.char_nodes[char].weight}")
+                    print("  → Arbre après mise à jour:")
+                    self.print_tree()
+        
+        binary_code = ''.join(encoded_codes)
+        if verbose:
+            print("\n" + "=" * 60)
+        return binary_code, encoded_with_nyt
+    
+    def decode_message(self, binary_code, verbose=True):
+        """Décode un message Huffman adaptatif"""
+        decoded_chars = []
+        decoded_with_nyt = []
+        index = 0
+        step = 0
 
-        self.nyt = new_nyt
-        self.leaves[symbol] = symbol_node
-        return symbol_node
-
-    def encode_symbol(self, symbol: str) -> str:
-        if symbol in self.leaves:
-            node = self.leaves[symbol]
-            encoded = self._code_for_node(node)
-            self._update(node)
-            return encoded
-
-        encoded = self._code_for_node(self.nyt) + encode_fixed(symbol)
-        node = self._insert_new_symbol(symbol)
-        self._update(node)
-        return encoded
-
-    def decode_stream(self, bits: str) -> str:
-        out: list[str] = []
-        idx = 0
-        while idx < len(bits):
+        if verbose:
+            print("\n" + "=" * 60)
+            print("ÉTAPES DU DÉCODAGE")
+            print("=" * 60)
+        
+        while index < len(binary_code):
+            # Traverser l'arbre pour trouver un symbole
             node = self.root
-            while not node.is_leaf():
-                if idx >= len(bits):
-                    raise ValueError("Bitstream ended in the middle of a tree traversal")
-                bit = bits[idx]
-                idx += 1
-                if bit == "0":
-                    node = node.left  # type: ignore[assignment]
-                elif bit == "1":
-                    node = node.right  # type: ignore[assignment]
+            
+            while not self.is_leaf(node):
+                if index >= len(binary_code):
+                    break
+                
+                bit = binary_code[index]
+                index += 1
+                
+                if bit == '0':
+                    if node.left:
+                        node = node.left
+                    else:
+                        break
                 else:
-                    raise ValueError("Bitstream contains characters other than 0/1")
+                    if node.right:
+                        node = node.right
+                    else:
+                        break
+            
+            if self.is_leaf(node) and index <= len(binary_code):
+                step += 1
+                if node.is_nyt:
+                    # Décoder le caractère avec code fixe
+                    remaining_bits = binary_code[index:]
+                    
+                    # Lire E bits d'abord
+                    if len(remaining_bits) < E:
+                        break
+                    
+                    e_bits = remaining_bits[:E]
+                    e_value = int(e_bits, 2)
+                    index += E
+                    
+                    if e_value < R:
+                        # Lire 1 bit supplémentaire (total E+1 bits)
+                        if len(binary_code) < index + 1:
+                            break
+                        extra_bit = binary_code[index]
+                        index += 1
+                        value = (e_value << 1) | int(extra_bit)
+                        k = value + 1
+                    else:
+                        # Les E bits suffisent
+                        k = e_value + R + 1
+                    
+                    if k <= len(self.alphabet):
+                        char = self.alphabet[k - 1]
+                        decoded_chars.append(char)
+                        decoded_with_nyt.append("NYT")
 
-            if node is self.nyt:
-                symbol, consumed = decode_fixed(bits, idx)
-                idx += consumed
-                out.append(symbol)
-                new_node = self._insert_new_symbol(symbol)
-                self._update(new_node)
+                        if verbose:
+                            print(f"\nÉtape {step}: NYT -> '{char}'")
+                            print(f"  → Index courant: {index}")
+                            print("  → Arbre après insertion:")
+                        
+                        # Ajouter à l'arbre
+                        self.add_char_to_tree(char)
+
+                        if verbose:
+                            self.print_tree()
+                    else:
+                        break
+                        
+                elif node.char:
+                    decoded_chars.append(node.char)
+                    decoded_with_nyt.append(node.char)
+
+                    if verbose:
+                        print(f"\nÉtape {step}: symbole existant '{node.char}'")
+                        print(f"  → Index courant: {index}")
+                        print("  → Arbre après mise à jour:")
+                    
+                    # Incrémenter le poids
+                    self.increment_char_weight(node.char)
+
+                    if verbose:
+                        self.print_tree()
             else:
-                if node.symbol is None:
-                    raise ValueError("Leaf without symbol encountered")
-                out.append(node.symbol)
-                self._update(node)
+                break
 
-        return "".join(out)
+        if verbose:
+            print("\n" + "=" * 60)
+        
+        return ''.join(decoded_chars), decoded_with_nyt
+    
+    def print_tree(self):
+        """Affiche l'arbre de Huffman adaptatif"""
+        def print_node(node, prefix="", is_left=None):
+            if node is None:
+                return
+            
+            if is_left is None:
+                print(prefix + repr(node))
+            else:
+                print(prefix + ("├── L: " if is_left else "└── R: ") + repr(node))
+            
+            if not self.is_leaf(node):
+                if node.left:
+                    print_node(node.left, prefix + ("│   " if is_left else "    "), True)
+                if node.right:
+                    print_node(node.right, prefix + ("│   " if is_left else "    "), False)
+        
+        print_node(self.root)
 
 
-def is_condition(e: int, r: int) -> bool:
-    return 0 <= e <= 2 * r
+def run_encode_then_decode(message, verbose, output_dir):
+    print("=" * 60)
+    print("HUFFMAN ADAPTATIF - ENCODAGE")
+    print("=" * 60)
+    print(f"Message: {message}")
+    print(f"Paramètres: M={M}, E={E}, R={R}")
 
+    huffman = AdaptiveHuffman()
+    binary_code, with_nyt = huffman.encode_message(message, verbose=verbose)
 
-def find_k(char: str) -> int:
-    if char not in _CHAR_TO_INDEX:
-        raise ValueError(f"Unsupported char '{char}'. Allowed alphabet: {ALPHABET}")
-    return _CHAR_TO_INDEX[char]
+    title = "Résumé de l'encodage:"
+    print(f"\n{title:^60}")
+    print(f"Message avec NYT: {' '.join(with_nyt)}")
+    print(f"Code binaire: {binary_code}")
+    print(f"Longueur du code: {len(binary_code)} bits")
+    print(f"Nombre de swaps: {huffman.swap_count}")
+    print()
 
+    with open(output_dir / "input.txt", "w") as f:
+        f.write(message)
 
-def encode_fixed(char: str) -> str:
-    idx = find_k(char)
-    k = idx + 1
-    if k <= 2 * R:
-        return format(k - 1, f"0{E + 1}b")
-    return format(k - R - 1, f"0{E}b")
+    with open(output_dir / "encoded.txt", "w") as f:
+        f.write(binary_code)
 
+    with open(output_dir / "encoded_NYT.txt", "w") as f:
+        f.write(' '.join(with_nyt))
 
-def decode_fixed(bits: str, start: int) -> tuple[str, int]:
-    if start + E > len(bits):
-        raise ValueError("Not enough bits to decode fixed-length prefix")
+    print("=" * 60)
+    print("HUFFMAN ADAPTATIF - DÉCODAGE")
+    print("=" * 60)
 
-    prefix = int(bits[start : start + E], 2)
-    if prefix < R:
-        if start + E + 1 > len(bits):
-            raise ValueError("Not enough bits to decode extended fixed-length symbol")
-        value = int(bits[start : start + E + 1], 2)
-        k = value + 1
-        consumed = E + 1
+    huffman2 = AdaptiveHuffman()
+    decoded_message, decoded_with_nyt = huffman2.decode_message(binary_code, verbose=verbose)
+
+    print(f"Message décodé avec NYT: {' '.join(decoded_with_nyt)}")
+    print(f"Message décodé: {decoded_message}")
+    print()
+
+    with open(output_dir / "decoded.txt", "w") as f:
+        f.write(decoded_message)
+
+    if decoded_message == message:
+        print("✓ Encodage/Décodage réussi!")
     else:
-        k = prefix + R + 1
-        consumed = E
+        print(f"✗ Erreur: {decoded_message} != {message}")
 
-    idx = k - 1
-    if idx < 0 or idx >= M:
-        raise ValueError("Decoded symbol index is outside the allowed alphabet")
-    return ALPHABET[idx], consumed
+    print()
+    print(f"Fichiers sauvegardés dans: {output_dir.absolute()}")
 
 
-def encode_huffman(msg: str) -> str:
-    coder = AdaptiveHuffman()
-    encoded_parts = []
-    for char in msg:
-        encoded_parts.append(coder.encode_symbol(char))
-    return "".join(encoded_parts)
+def run_decode_only(binary_code, verbose, output_dir):
+    if any(bit not in "01" for bit in binary_code):
+        print("Erreur: le code à décoder doit contenir uniquement 0 et 1.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("HUFFMAN ADAPTATIF - DÉCODAGE (CODE FINAL)")
+    print("=" * 60)
+    print(f"Code binaire: {binary_code}")
+    print(f"Longueur: {len(binary_code)} bits")
+
+    huffman = AdaptiveHuffman()
+    decoded_message, decoded_with_nyt = huffman.decode_message(binary_code, verbose=verbose)
+
+    print(f"\nMessage décodé avec NYT: {' '.join(decoded_with_nyt)}")
+    print(f"Message décodé: {decoded_message}")
+
+    with open(output_dir / "encoded.txt", "w") as f:
+        f.write(binary_code)
+
+    with open(output_dir / "decoded.txt", "w") as f:
+        f.write(decoded_message)
+
+    with open(output_dir / "encoded_NYT.txt", "w") as f:
+        f.write(' '.join(decoded_with_nyt))
+
+    print()
+    print(f"Fichiers sauvegardés dans: {output_dir.absolute()}")
 
 
-def decode_huffman(cyphertext: str) -> str:
-    coder = AdaptiveHuffman()
-    return coder.decode_stream(cyphertext)
+def main():
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python3 huffman.py <message>")
+        print("  python3 huffman.py encode <message> [--quiet]")
+        print("  python3 huffman.py decode <code_binaire> [--quiet]")
+        sys.exit(1)
 
+    verbose = "--quiet" not in sys.argv
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
 
-def write_output_files(message: str, encoded: str, decoded: str, output_dir: str = "output") -> dict[str, str]:
-    path = Path(output_dir)
-    path.mkdir(parents=True, exist_ok=True)
+    mode = sys.argv[1]
 
-    input_file = path / "input.txt"
-    encoded_file = path / "encoded.txt"
-    decoded_file = path / "decoded.txt"
-    summary_file = path / "summary.json"
-
-    input_file.write_text(message, encoding="utf-8")
-    encoded_file.write_text(encoded, encoding="utf-8")
-    decoded_file.write_text(decoded, encoding="utf-8")
-
-    compression_ratio = (len(encoded) / (len(message) * 8)) if message else 0.0
-    summary_file.write_text(
-        json.dumps(
-            {
-                "alphabet": ALPHABET,
-                "input_length": len(message),
-                "encoded_bits": len(encoded),
-                "compression_ratio_vs_ascii": compression_ratio,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    return {
-        "input": str(input_file),
-        "encoded": str(encoded_file),
-        "decoded": str(decoded_file),
-        "summary": str(summary_file),
-    }
-
-
-def run_test() -> None:
-    assert find_k("d") == 3, f"Expected 3, got {find_k('d')}"
-    assert is_condition(E, R)
-    msg = "darkvador2026"
-    cyphertext = encode_huffman(msg)
-    decoded_msg = decode_huffman(cyphertext)
-    assert msg == decoded_msg, f"Expected {msg}, got {decoded_msg}"
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Adaptive Huffman (FGK) encoder/decoder")
-    parser.add_argument("message", nargs="?", help=f"Message to encode with alphabet: {ALPHABET}")
-    parser.add_argument("--output-dir", default="output", help="Directory where output files are written")
-    args = parser.parse_args()
-
-    if not args.message:
-        run_test()
-        print("Self-test passed. Provide a message to produce files in output/.")
-        return
-
-    encoded = encode_huffman(args.message)
-    decoded = decode_huffman(encoded)
-    files = write_output_files(args.message, encoded, decoded, args.output_dir)
-    print(json.dumps(files, indent=2))
+    if mode == "encode":
+        if len(sys.argv) < 3:
+            print("Erreur: message manquant pour le mode encode.")
+            sys.exit(1)
+        run_encode_then_decode(sys.argv[2], verbose, output_dir)
+    elif mode == "decode":
+        if len(sys.argv) < 3:
+            print("Erreur: code binaire manquant pour le mode decode.")
+            sys.exit(1)
+        run_decode_only(sys.argv[2], verbose, output_dir)
+    else:
+        # Compatibilité: comportement historique
+        run_encode_then_decode(mode, verbose, output_dir)
 
 
 if __name__ == "__main__":
