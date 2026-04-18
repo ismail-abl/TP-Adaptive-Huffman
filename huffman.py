@@ -60,6 +60,8 @@ class AdaptiveHuffman:
                 continue
             if self._is_ancestor(current, node):
                 continue
+            if self._is_ancestor(node, current):
+                continue
             candidates.append(current)
         if not candidates:
             return None
